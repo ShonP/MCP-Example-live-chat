@@ -1,18 +1,13 @@
 import type { FC } from 'react';
-import { useRef, useEffect } from 'react';
-import { Send, Plane } from 'lucide-react';
-import type { IChatProps, IMessageProps, IEventCardProps } from './Chat.types';
+import { useRef, useEffect, useState } from 'react';
+import { Send, Plane, ChevronRight, Sparkles, CheckCircle } from 'lucide-react';
+import type { IChatProps, IMessageProps } from './Chat.types';
+import type { IAgentEvent } from '../../types';
 import {
   ChatContainer,
   MessagesContainer,
   MessageWrapper,
   MessageBubble,
-  EventsContainer,
-  EventCard,
-  EventTitle,
-  EventTitleText,
-  EventDescription,
-  EventData,
   InputContainer,
   InputWrapper,
   TextArea,
@@ -20,32 +15,129 @@ import {
   Header,
   Title,
   Subtitle,
-  StreamingIndicator,
-  PulsingDot,
   EmptyState,
   EmptyStateIcon,
   EmptyStateText,
+  ReasoningContainer,
+  ReasoningHeader,
+  ReasoningHeaderText,
+  StepCount,
+  ChevronIcon,
+  ReasoningContent,
+  StepsList,
+  StepItem,
+  StepIcon,
+  StepText,
+  StepTitle,
+  StepDescription,
+  StepData,
+  CurrentStepContainer,
+  CurrentStepDot,
+  CurrentStepContent,
+  CurrentStepTitle,
+  CurrentStepDescription,
+  AssistantLabel,
 } from './Chat.style';
 import { useChat } from './Chat.hooks';
-import { EVENT_ICONS, EVENT_LABELS } from './Chat.constants';
+import { EVENT_ICONS } from './Chat.constants';
 
-const EventCardComponent: FC<IEventCardProps> = ({ event }) => {
-  const Icon = EVENT_ICONS[event.type];
+const getEventColor = (type: string): string => {
+  switch (type) {
+    case 'annotation':
+      return 'var(--color-info)';
+    case 'tool_call':
+      return 'var(--color-warning)';
+    case 'tool_result':
+      return 'var(--color-success)';
+    case 'error':
+      return 'var(--color-error)';
+    case 'message':
+      return 'var(--color-primary)';
+    default:
+      return 'var(--color-muted)';
+  }
+};
+
+interface IReasoningStepsProps {
+  events: IAgentEvent[];
+  isStreaming: boolean;
+}
+
+const ReasoningSteps: FC<IReasoningStepsProps> = ({ events, isStreaming }) => {
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Filter out 'done' events and get meaningful steps
+  const steps = events.filter((e) => e.type !== 'done' && e.type !== 'message');
+  const currentStep = isStreaming ? steps[steps.length - 1] : null;
+  const completedSteps = isStreaming ? steps.slice(0, -1) : steps;
+
+  if (steps.length === 0 && !isStreaming) {
+    return null;
+  }
 
   return (
-    <EventCard eventType={event.type}>
-      <EventTitle>
-        <Icon size={14} />
-        <span>{EVENT_LABELS[event.type]}</span>
-        <EventTitleText>{event.title}</EventTitleText>
-      </EventTitle>
-      {event.description && (
-        <EventDescription>{event.description}</EventDescription>
+    <>
+      {/* Live current step indicator - only show while streaming */}
+      {isStreaming && currentStep && (
+        <CurrentStepContainer>
+          <CurrentStepDot color={getEventColor(currentStep.type)} />
+          <CurrentStepContent>
+            <CurrentStepTitle>
+              {currentStep.title}
+              <ChevronRight size={14} />
+            </CurrentStepTitle>
+            {currentStep.description && (
+              <CurrentStepDescription>
+                {currentStep.description}
+              </CurrentStepDescription>
+            )}
+          </CurrentStepContent>
+        </CurrentStepContainer>
       )}
-      {event.data && Object.keys(event.data).length > 0 && (
-        <EventData>{JSON.stringify(event.data, null, 2)}</EventData>
+
+      {/* Collapsible completed steps - only show when NOT streaming */}
+      {!isStreaming && completedSteps.length > 0 && (
+        <ReasoningContainer>
+          <ReasoningHeader onClick={() => setIsOpen(!isOpen)}>
+            <ChevronIcon isOpen={isOpen}>
+              <ChevronRight size={14} />
+            </ChevronIcon>
+            <ReasoningHeaderText>
+              Reasoned in {completedSteps.length} steps
+            </ReasoningHeaderText>
+            <StepCount>
+              {isOpen ? 'collapse' : 'expand'}
+            </StepCount>
+          </ReasoningHeader>
+
+          <ReasoningContent isOpen={isOpen}>
+            <StepsList>
+              {completedSteps.map((event, index) => {
+                const Icon = EVENT_ICONS[event.type] || CheckCircle;
+                return (
+                  <StepItem key={index} eventType={event.type}>
+                    <StepIcon color={getEventColor(event.type)}>
+                      <Icon size={14} />
+                    </StepIcon>
+                    <StepText>
+                      <StepTitle>{event.title}</StepTitle>
+                      {event.description && (
+                        <StepDescription>{event.description}</StepDescription>
+                      )}
+                      {event.data && Object.keys(event.data).length > 0 && (
+                        <StepData>
+                          {JSON.stringify(event.data, null, 2)}
+                        </StepData>
+                      )}
+                    </StepText>
+                  </StepItem>
+                );
+              })}
+            </StepsList>
+          </ReasoningContent>
+        </ReasoningContainer>
       )}
-    </EventCard>
+    </>
   );
 };
 
@@ -54,22 +146,20 @@ const Message: FC<IMessageProps> = ({ role, content, events, isStreaming }) => {
 
   return (
     <MessageWrapper isUser={isUser}>
-      <MessageBubble isUser={isUser}>
-        {content || (isStreaming ? '' : 'Processing...')}
+      <div>
+        {!isUser && (
+          <AssistantLabel>
+            <Sparkles size={14} />
+            Copilot
+          </AssistantLabel>
+        )}
+        <MessageBubble isUser={isUser}>
+          {content || (isStreaming && (!events || events.length === 0) ? 'Thinking...' : '')}
+        </MessageBubble>
         {!isUser && events && events.length > 0 && (
-          <EventsContainer>
-            {events.map((event, index) => (
-              <EventCardComponent key={index} event={event} />
-            ))}
-          </EventsContainer>
+          <ReasoningSteps events={events} isStreaming={isStreaming || false} />
         )}
-        {isStreaming && (
-          <StreamingIndicator>
-            <PulsingDot />
-            <span>Agent is thinking...</span>
-          </StreamingIndicator>
-        )}
-      </MessageBubble>
+      </div>
     </MessageWrapper>
   );
 };
