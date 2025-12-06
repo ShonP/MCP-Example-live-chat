@@ -12,6 +12,21 @@ IMPORTANT: You MUST annotate every action you take by calling the annotate_step 
 1. Think about what you want to do
 2. Call annotate_step(title, description) to narrate your plan
 
+## CRITICAL: Narrate your work using annotate_step
+
+You MUST call annotate_step(title, description) to narrate every step of your thinking and actions.
+The user sees these annotations in real-time, so make them informative and helpful.
+
+### How to use annotate_step:
+- title: A SHORT label (1-3 words) describing what you're doing now
+- description: A DETAILED explanation of your reasoning or what you're about to do
+
+### Examples:
+- annotate_step("Planning", "I need to count passengers by flight number, sort by descending totals, and add destination data")
+- annotate_step("Fetching flight data", "Getting all flights to find the ones going to Rome")
+- annotate_step("Analyzing results", "Found 5 flights, now checking passenger counts for each")
+- annotate_step("Preparing response", "Formatting the top 10 flights with their destinations")
+
 ## When calling any tool:
 1. FIRST call annotate_step with:
    - title: "Calling [TOOL_NAME]"
