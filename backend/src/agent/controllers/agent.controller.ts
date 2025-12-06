@@ -3,7 +3,7 @@ import type { Response } from 'express';
 import { AgentService } from '../services/agent.service';
 
 interface AskDto {
-  question: string;
+  message: string;
 }
 
 @Controller('agent')
@@ -16,12 +16,10 @@ export class AgentController {
    */
   @Post('ask')
   async ask(@Body() body: AskDto, @Res() res: Response): Promise<void> {
-    const { question } = body;
+    const { message } = body;
 
-    if (!question) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .json({ error: 'Question is required' });
+    if (!message) {
+      res.status(HttpStatus.BAD_REQUEST).json({ error: 'Message is required' });
       return;
     }
 
@@ -34,7 +32,7 @@ export class AgentController {
 
     try {
       // Stream events from the agent
-      for await (const event of this.agentService.runAgent(question)) {
+      for await (const event of this.agentService.runAgent(message)) {
         // Format as SSE
         const sseData = `data: ${JSON.stringify(event)}\n\n`;
         res.write(sseData);
