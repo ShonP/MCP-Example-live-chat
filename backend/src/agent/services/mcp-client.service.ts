@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import * as path from 'path';
+import { MCP_SERVERS, McpServerConfig } from '../config/mcp-servers.config';
 
 interface TextContent {
   type: 'text';
@@ -16,94 +16,180 @@ export interface MCPTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  serverName: string; // Track which server this tool belongs to
+}
+
+interface McpConnection {
+  config: McpServerConfig;
+  client: Client;
+  transport: StdioClientTransport;
+  tools: MCPTool[];
 }
 
 @Injectable()
 export class McpClientService implements OnModuleInit, OnModuleDestroy {
-  private client: Client | null = null;
-  private transport: StdioClientTransport | null = null;
-  private tools: MCPTool[] = [];
+  private connections: Map<string, McpConnection> = new Map();
+  private allTools: MCPTool[] = [];
 
   async onModuleInit() {
-    await this.connect();
+    await this.connectAll();
   }
 
   async onModuleDestroy() {
-    await this.disconnect();
+    await this.disconnectAll();
   }
 
-  async connect(): Promise<void> {
+  /**
+   * Connect to all enabled MCP servers
+   */
+  async connectAll(): Promise<void> {
+    const enabledServers = MCP_SERVERS.filter((s) => s.enabled);
+    console.log(
+      `Connecting to ${enabledServers.length} MCP servers:`,
+      enabledServers.map((s) => s.name),
+    );
+
+    const connectionPromises = enabledServers.map((config) =>
+      this.connectToServer(config),
+    );
+
+    const results = await Promise.allSettled(connectionPromises);
+
+    // Log results
+    results.forEach((result, index) => {
+      const serverName = enabledServers[index].name;
+      if (result.status === 'fulfilled') {
+        console.log(`✓ Connected to ${serverName}`);
+      } else {
+        console.error(`✗ Failed to connect to ${serverName}:`, result.reason);
+      }
+    });
+
+    // Aggregate all tools
+    this.refreshAllTools();
+  }
+
+  /**
+   * Connect to a single MCP server
+   */
+  private async connectToServer(config: McpServerConfig): Promise<void> {
     try {
-      // Path to the MCP server
-      const mcpServerPath = path.resolve(
-        __dirname,
-        '../../../../mcp-server/build/index.js',
-      );
+      console.log(`Connecting to MCP server: ${config.name}`);
+      console.log(`  Command: ${config.command} ${config.args.join(' ')}`);
 
-      console.log('Connecting to MCP server at:', mcpServerPath);
+      // Merge environment variables, filtering out undefined values
+      const mergedEnv: Record<string, string> = {};
+      if (config.env) {
+        for (const [key, value] of Object.entries(process.env)) {
+          if (value !== undefined) {
+            mergedEnv[key] = value;
+          }
+        }
+        Object.assign(mergedEnv, config.env);
+      }
 
-      this.transport = new StdioClientTransport({
-        command: 'node',
-        args: [mcpServerPath],
+      const transport = new StdioClientTransport({
+        command: config.command,
+        args: config.args,
+        env: config.env ? mergedEnv : undefined,
       });
 
-      this.client = new Client({
-        name: 'flight-agent-client',
+      const client = new Client({
+        name: `agent-client-${config.name}`,
         version: '1.0.0',
       });
 
-      await this.client.connect(this.transport);
-      console.log('Connected to MCP server');
+      await client.connect(transport);
 
-      // Fetch available tools
-      await this.refreshTools();
+      // Fetch tools from this server
+      const result = await client.listTools();
+      const tools: MCPTool[] = result.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description || '',
+        inputSchema: tool.inputSchema as Record<string, unknown>,
+        serverName: config.name,
+      }));
+
+      console.log(
+        `  Found ${tools.length} tools:`,
+        tools.map((t) => t.name),
+      );
+
+      this.connections.set(config.name, {
+        config,
+        client,
+        transport,
+        tools,
+      });
     } catch (error) {
-      console.error('Failed to connect to MCP server:', error);
+      console.error(`Failed to connect to ${config.name}:`, error);
       throw error;
     }
   }
 
-  async disconnect(): Promise<void> {
-    if (this.client) {
-      await this.client.close();
-      this.client = null;
+  /**
+   * Refresh the aggregated tools list from all connections
+   */
+  private refreshAllTools(): void {
+    this.allTools = [];
+    for (const connection of this.connections.values()) {
+      this.allTools.push(...connection.tools);
     }
+    console.log(`Total tools available: ${this.allTools.length}`);
   }
 
-  async refreshTools(): Promise<MCPTool[]> {
-    if (!this.client) {
-      throw new Error('MCP client not connected');
+  /**
+   * Disconnect from all servers
+   */
+  async disconnectAll(): Promise<void> {
+    for (const [name, connection] of this.connections) {
+      try {
+        await connection.client.close();
+        console.log(`Disconnected from ${name}`);
+      } catch (error) {
+        console.error(`Error disconnecting from ${name}:`, error);
+      }
     }
-
-    const result = await this.client.listTools();
-    this.tools = result.tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description || '',
-      inputSchema: tool.inputSchema as Record<string, unknown>,
-    }));
-
-    console.log(
-      'Available MCP tools:',
-      this.tools.map((t) => t.name),
-    );
-    return this.tools;
+    this.connections.clear();
+    this.allTools = [];
   }
 
+  /**
+   * Get all tools from all connected servers
+   */
   getTools(): MCPTool[] {
-    return this.tools;
+    return this.allTools;
   }
 
+  /**
+   * Get tools from a specific server
+   */
+  getToolsFromServer(serverName: string): MCPTool[] {
+    const connection = this.connections.get(serverName);
+    return connection ? connection.tools : [];
+  }
+
+  /**
+   * Call a tool - automatically routes to the correct server
+   */
   async callTool(
     name: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
-    if (!this.client) {
-      throw new Error('MCP client not connected');
+    // Find the tool and its server
+    const tool = this.allTools.find((t) => t.name === name);
+    if (!tool) {
+      throw new Error(`Tool not found: ${name}`);
     }
 
-    console.log(`Calling MCP tool: ${name}`, args);
+    const connection = this.connections.get(tool.serverName);
+    if (!connection) {
+      throw new Error(`Server not connected: ${tool.serverName}`);
+    }
 
-    const result = (await this.client.callTool({
+    console.log(`Calling tool ${name} on server ${tool.serverName}`, args);
+
+    const result = (await connection.client.callTool({
       name,
       arguments: args,
     })) as ToolResult;
@@ -121,5 +207,19 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
     }
 
     return result.content;
+  }
+
+  /**
+   * Get connected server names
+   */
+  getConnectedServers(): string[] {
+    return Array.from(this.connections.keys());
+  }
+
+  /**
+   * Check if a specific server is connected
+   */
+  isServerConnected(serverName: string): boolean {
+    return this.connections.has(serverName);
   }
 }

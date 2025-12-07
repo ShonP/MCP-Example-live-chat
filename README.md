@@ -7,21 +7,32 @@ A real-time chat application demonstrating the Model Context Protocol (MCP) with
 ## Features
 
 - 🤖 **AI Agent** with OpenAI GPT-4o
-- 🔧 **MCP Server** with flight/passenger query tools
+- 🔧 **Multi-MCP Server Support** - connects to multiple MCP servers simultaneously
 - 📡 **Real-time SSE streaming** - see the agent's thinking process live
 - 🎨 **Copilot-style UI** with collapsible reasoning steps
 - 🌙 **Dark/Light mode** support
+
+## MCP Servers
+
+This project supports multiple MCP servers:
+
+| Server | Description | Tools |
+|--------|-------------|-------|
+| **Flight Server** | Local flight/passenger data | `get_flights`, `get_passengers_by_flight`, `count_passengers_by_flight`, etc. |
+| **Fabric RTI** | Microsoft Fabric Real-Time Intelligence | `kusto_query`, `eventstream_list`, `activator_create_trigger`, etc. |
 
 ## Architecture
 
 ```
 ┌─────────────────┐     SSE Events      ┌─────────────────┐     MCP (stdio)     ┌─────────────────┐
-│                 │◄───────────────────│                 │◄──────────────────►│                 │
-│     Frontend    │     HTTP POST      │     Backend     │                    │   MCP Server    │
-│   (React/Vite)  │──────────────────►│    (NestJS)     │                    │  (TypeScript)   │
-│                 │                    │                 │                    │                 │
-└─────────────────┘                    └─────────────────┘                    └─────────────────┘
-     :5173                                  :3000                              (spawned by backend)
+│                 │◄───────────────────│                 │◄──────────────────►│  Flight Server  │
+│     Frontend    │     HTTP POST      │     Backend     │                    │  (TypeScript)   │
+│   (React/Vite)  │──────────────────►│    (NestJS)     │                    └─────────────────┘
+│                 │                    │                 │
+└─────────────────┘                    │                 │     MCP (stdio)     ┌─────────────────┐
+     :5173                             │                 │◄──────────────────►│  Fabric RTI     │
+                                       └─────────────────┘                    │  (Python/uvx)   │
+                                            :3000                             └─────────────────┘
 ```
 
 ## Prerequisites
@@ -29,6 +40,7 @@ A real-time chat application demonstrating the Model Context Protocol (MCP) with
 - Node.js 18+
 - npm or yarn
 - OpenAI API key
+- **uv** (for Fabric RTI MCP server) - [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ## Installation
 
@@ -39,7 +51,17 @@ git clone https://github.com/ShonP/MCP-Example-live-chat.git
 cd MCP-Example-live-chat
 ```
 
-### 2. Install dependencies
+### 2. Install uv (for Fabric RTI MCP server)
+
+```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or with Homebrew
+brew install uv
+```
+
+### 3. Install dependencies
 
 ```bash
 # Install root dependencies
@@ -55,13 +77,13 @@ cd backend && npm install && cd ..
 cd frontend && npm install && cd ..
 ```
 
-### 3. Build the MCP server
+### 4. Build the MCP server
 
 ```bash
 cd mcp-server && npm run build && cd ..
 ```
 
-### 4. Configure environment
+### 5. Configure environment
 
 Create a `.env` file in the `backend` folder:
 
@@ -138,6 +160,8 @@ mcp-example/
 
 ## Available MCP Tools
 
+### Flight Server Tools
+
 | Tool | Description |
 |------|-------------|
 | `get_flights` | Get flight information, filter by destination/airline |
@@ -145,6 +169,44 @@ mcp-example/
 | `count_passengers_by_flight` | Count passengers per flight, sorted |
 | `get_top_flights_with_destinations` | Get top N flights by passenger count |
 | `get_destination_info` | Get destination details by airport code |
+
+### Microsoft Fabric RTI Tools
+
+| Tool | Description |
+|------|-------------|
+| `kusto_query` | Execute KQL queries on Eventhouse/ADX databases |
+| `kusto_list_databases` | List all databases in a Kusto cluster |
+| `kusto_list_tables` | List all tables in a database |
+| `kusto_get_table_schema` | Get detailed schema for a table |
+| `kusto_sample_table_data` | Get sample records from a table |
+| `eventstream_list` | List all Eventstreams in a Fabric workspace |
+| `eventstream_create` | Create new Eventstreams |
+| `activator_create_trigger` | Create alerts based on KQL conditions |
+
+> **Note**: The Fabric RTI server provides 30+ tools. See the [microsoft/fabric-rti-mcp](https://github.com/microsoft/fabric-rti-mcp) repo for the complete list.
+
+## Configuring MCP Servers
+
+You can enable/disable MCP servers in `backend/src/agent/config/mcp-servers.config.ts`:
+
+```typescript
+export const MCP_SERVERS: McpServerConfig[] = [
+  {
+    name: 'flight-server',
+    enabled: true,  // ← Toggle here
+    // ...
+  },
+  {
+    name: 'fabric-rti',
+    enabled: true,  // ← Toggle here
+    env: {
+      KUSTO_SERVICE_URI: 'https://your-cluster.kusto.windows.net/',
+      KUSTO_SERVICE_DEFAULT_DB: 'YourDatabase',
+    },
+    // ...
+  },
+];
+```
 
 ## How It Works
 

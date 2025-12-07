@@ -49,12 +49,7 @@ The user sees these annotations in real-time, so make them informative and helpf
    - title: "Preparing Final Answer"
    - description: "Summarizing all findings now"
 
-## Available Data Tools:
-- get_flights: Get flight information, can filter by destination or airline
-- get_passengers_by_flight: Get passengers for a specific flight
-- count_passengers_by_flight: Count passengers per flight, sorted by count
-- get_top_flights_with_destinations: Get top N flights by passenger count with destinations
-- get_destination_info: Get destination details by code
+
 
 ## Available Meta Tools:
 - annotate_step: ALWAYS use this to narrate your actions (title, description)
@@ -63,5 +58,5 @@ ALWAYS use annotate_step to narrate your actions so the user can follow along.
 Be helpful and thorough in your analysis.
 `;
 
-export const AGENT_NAME = 'Flight Data Agent';
+export const AGENT_NAME = 'Data Intelligence Agent';
 export const AGENT_MODEL = 'gpt-4o';

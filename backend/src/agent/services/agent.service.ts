@@ -1,22 +1,134 @@
 import { Injectable } from '@nestjs/common';
-import OpenAI from 'openai';
+import { Agent, run, tool } from '@openai/agents';
+import { z } from 'zod';
 import { McpClientService } from './mcp-client.service';
 import { AgentStreamEvent, createEvent } from '../types/agent-event.types';
 import { AGENT_INSTRUCTIONS, AGENT_MODEL } from '../config/agent.config';
 
-type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
-type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool;
-type ChatCompletionMessageToolCall =
-  OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
+// Callback types for event emission
+interface AgentCallbacks {
+  onAnnotation: (title: string, description: string) => void;
+  onToolCall: (toolName: string, args: Record<string, unknown>) => void;
+  onToolResult: (toolName: string, result: unknown) => void;
+}
 
 @Injectable()
 export class AgentService {
-  private openai: OpenAI;
+  private agent: Agent | null = null;
 
-  constructor(private readonly mcpClient: McpClientService) {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+  constructor(private readonly mcpClient: McpClientService) {}
+
+  /**
+   * Create the agent with all tools (MCP + annotate_step)
+   */
+  private createAgent(callbacks: AgentCallbacks): Agent {
+    const { onAnnotation, onToolCall, onToolResult } = callbacks;
+
+    // Create annotate_step tool that emits events
+    const annotateStepTool = tool({
+      name: 'annotate_step',
+      description:
+        'Narrate your current action to keep the user informed. Call this before and after every tool call.',
+      parameters: z.object({
+        title: z.string().describe('Short title for this step (1-3 words)'),
+        description: z
+          .string()
+          .describe('Detailed description of what you are doing'),
+      }),
+      execute: ({ title, description }) => {
+        onAnnotation(title, description);
+        return { ok: true };
+      },
     });
+
+    // Create tools from MCP server
+    const mcpTools = this.mcpClient.getTools();
+    const agentTools = mcpTools.map((mcpTool) => {
+      // Convert MCP tool schema to Zod schema dynamically
+      const zodSchema = this.convertToZodSchema(mcpTool.inputSchema);
+
+      return tool({
+        name: mcpTool.name,
+        description: mcpTool.description,
+        parameters: zodSchema,
+        execute: async (args) => {
+          // Emit tool_call event before execution
+          onToolCall(mcpTool.name, args as Record<string, unknown>);
+
+          const result = await this.mcpClient.callTool(
+            mcpTool.name,
+            args as Record<string, unknown>,
+          );
+
+          // Emit tool_result event after execution
+          onToolResult(mcpTool.name, result);
+
+          return result;
+        },
+      });
+    });
+
+    return new Agent({
+      name: 'DataIntelligenceAgent',
+      instructions: AGENT_INSTRUCTIONS,
+      model: AGENT_MODEL,
+      tools: [annotateStepTool, ...agentTools],
+    });
+  }
+
+  /**
+   * Convert JSON Schema to Zod schema
+   * OpenAI strict mode requires all properties in 'required' array.
+   * For optional params, we use .nullable() so they can be null.
+   */
+  private convertToZodSchema(
+    jsonSchema: Record<string, unknown>,
+  ): z.AnyZodObject {
+    const properties = jsonSchema.properties as
+      | Record<
+          string,
+          { type: string; description?: string; default?: unknown }
+        >
+      | undefined;
+    const required = (jsonSchema.required as string[]) || [];
+
+    if (!properties) {
+      return z.object({});
+    }
+
+    const shape: Record<string, z.ZodTypeAny> = {};
+
+    for (const [key, prop] of Object.entries(properties)) {
+      let zodType: z.ZodTypeAny;
+
+      switch (prop.type) {
+        case 'string':
+          zodType = z.string();
+          break;
+        case 'number':
+        case 'integer':
+          zodType = z.number();
+          break;
+        case 'boolean':
+          zodType = z.boolean();
+          break;
+        default:
+          zodType = z.string();
+      }
+
+      if (prop.description) {
+        zodType = zodType.describe(prop.description);
+      }
+
+      // For optional params, make them nullable (strict mode compatible)
+      if (!required.includes(key)) {
+        zodType = zodType.nullable();
+      }
+
+      shape[key] = zodType;
+    }
+
+    return z.object(shape);
   }
 
   /**
@@ -24,47 +136,51 @@ export class AgentService {
    * Uses a generator to yield events as they happen
    */
   async *runAgent(userMessage: string): AsyncGenerator<AgentStreamEvent> {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: AGENT_INSTRUCTIONS },
-      { role: 'user', content: userMessage },
-    ];
+    // Queue to collect events during execution
+    const eventQueue: AgentStreamEvent[] = [];
+    let resolveWaiting: (() => void) | null = null;
 
-    // Get MCP tools and convert to OpenAI format
-    const mcpTools = this.mcpClient.getTools();
-    const tools: ChatCompletionTool[] = [
-      // Add annotate_step as a special tool (handled locally, not via MCP)
-      {
-        type: 'function',
-        function: {
-          name: 'annotate_step',
-          description:
-            'Narrate your current action to keep the user informed. Call this before and after every tool call.',
-          parameters: {
-            type: 'object',
-            properties: {
-              title: {
-                type: 'string',
-                description: 'Short title for this step',
-              },
-              description: {
-                type: 'string',
-                description: 'Detailed description of what you are doing',
-              },
-            },
-            required: ['title', 'description'],
-          },
-        },
+    // Helper to push event and wake up the generator
+    const pushEvent = (event: AgentStreamEvent) => {
+      eventQueue.push(event);
+      if (resolveWaiting) {
+        resolveWaiting();
+        resolveWaiting = null;
+      }
+    };
+
+    // Create callbacks for all event types
+    const callbacks: AgentCallbacks = {
+      onAnnotation: (title: string, description: string) => {
+        pushEvent(createEvent('annotation', title, description));
       },
-      // Add MCP tools
-      ...mcpTools.map((tool) => ({
-        type: 'function' as const,
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.inputSchema,
-        },
-      })),
-    ];
+      onToolCall: (toolName: string, args: Record<string, unknown>) => {
+        pushEvent(
+          createEvent(
+            'tool_call',
+            `Calling ${toolName}`,
+            `Invoking tool with arguments`,
+            {
+              tool: toolName,
+              input: args,
+            },
+          ),
+        );
+      },
+      onToolResult: (toolName: string, result: unknown) => {
+        pushEvent(
+          createEvent(
+            'tool_result',
+            `${toolName} Complete`,
+            `Tool returned result`,
+            {
+              tool: toolName,
+              output: result,
+            },
+          ),
+        );
+      },
+    };
 
     // Emit initial event
     yield createEvent(
@@ -73,138 +189,79 @@ export class AgentService {
       `Processing your request: "${userMessage}"`,
     );
 
-    const maxIterations = 20; // Safety limit
-    let iteration = 0;
+    // Create agent with all callbacks
+    const agent = this.createAgent(callbacks);
 
-    while (iteration < maxIterations) {
-      iteration++;
+    // Start agent execution in background
+    let finalOutput: string | null = null;
+    let agentErrorMessage: string | null = null;
+    let agentDone = false;
 
-      // Call OpenAI
-      const response = await this.openai.chat.completions.create({
-        model: AGENT_MODEL,
-        messages,
-        tools,
-        tool_choice: 'auto',
+    const agentPromise = run(agent, userMessage, { maxTurns: 20 })
+      .then((result) => {
+        finalOutput =
+          typeof result.finalOutput === 'string'
+            ? result.finalOutput
+            : JSON.stringify(result.finalOutput);
+        agentDone = true;
+        if (resolveWaiting) {
+          resolveWaiting();
+          resolveWaiting = null;
+        }
+      })
+      .catch((error: unknown) => {
+        agentErrorMessage =
+          error instanceof Error ? error.message : String(error);
+        agentDone = true;
+        if (resolveWaiting) {
+          resolveWaiting();
+          resolveWaiting = null;
+        }
       });
 
-      const assistantMessage = response.choices[0].message;
-
-      // Add assistant message to history
-      messages.push(assistantMessage);
-
-      // Check if we have tool calls
-      const toolCalls = assistantMessage.tool_calls;
-      if (toolCalls && toolCalls.length > 0) {
-        // Process each tool call
-        for (const toolCall of toolCalls) {
-          yield* this.processToolCall(toolCall, messages);
+    // Yield events as they come in
+    while (!agentDone || eventQueue.length > 0) {
+      // Yield all queued events
+      while (eventQueue.length > 0) {
+        const event = eventQueue.shift();
+        if (event) {
+          yield event;
         }
-      } else {
-        // No tool calls - this is the final answer
-        const finalAnswer = assistantMessage.content || 'No response generated';
+      }
 
-        yield createEvent('message', 'Response', finalAnswer, {
-          content: finalAnswer,
-        });
-
-        yield createEvent('done', 'Complete', 'Agent finished processing', {
-          finalAnswer,
-        });
-
+      // If agent is done, break
+      if (agentDone) {
         break;
       }
+
+      // Wait for more events or completion
+      await new Promise<void>((resolve) => {
+        resolveWaiting = resolve;
+        // Timeout to check periodically
+        setTimeout(resolve, 100);
+      });
     }
 
-    if (iteration >= maxIterations) {
-      yield createEvent(
-        'error',
-        'Max iterations reached',
-        'The agent reached its maximum number of iterations',
-        { error: 'Max iterations exceeded' },
-      );
-    }
-  }
+    // Wait for agent to fully complete
+    await agentPromise;
 
-  /**
-   * Process a single tool call
-   */
-  private async *processToolCall(
-    toolCall: ChatCompletionMessageToolCall,
-    messages: ChatMessage[],
-  ): AsyncGenerator<AgentStreamEvent> {
-    // Only handle function type tool calls
-    if (toolCall.type !== 'function') {
+    // Handle error
+    if (agentErrorMessage) {
+      yield createEvent('error', 'Agent Error', agentErrorMessage, {
+        error: agentErrorMessage,
+      });
       return;
     }
 
-    const toolName = toolCall.function.name;
-    const toolArgs = JSON.parse(toolCall.function.arguments) as Record<
-      string,
-      unknown
-    >;
-
-    if (toolName === 'annotate_step') {
-      // Handle annotation locally - emit as SSE event
-      const title =
-        typeof toolArgs.title === 'string' ? toolArgs.title : 'Step';
-      const description =
-        typeof toolArgs.description === 'string' ? toolArgs.description : '';
-
-      yield createEvent('annotation', title, description);
-
-      // Add tool response to messages
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: JSON.stringify({ ok: true }),
+    // Emit final message
+    if (finalOutput) {
+      yield createEvent('message', 'Response', finalOutput, {
+        content: finalOutput,
       });
-    } else {
-      // Emit tool call event
-      yield createEvent(
-        'tool_call',
-        `Calling ${toolName}`,
-        `Executing tool with args`,
-        {
-          tool: toolName,
-          args: toolArgs,
-        },
-      );
-
-      try {
-        // Call MCP tool
-        const result = await this.mcpClient.callTool(toolName, toolArgs);
-
-        // Emit tool result event
-        yield createEvent(
-          'tool_result',
-          `${toolName} completed`,
-          'Tool execution successful',
-          {
-            tool: toolName,
-            result,
-          },
-        );
-
-        // Add tool response to messages
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        });
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-
-        yield createEvent('error', `${toolName} failed`, errorMessage, {
-          error: errorMessage,
-        });
-
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify({ error: errorMessage }),
-        });
-      }
     }
+
+    yield createEvent('done', 'Complete', 'Agent finished processing', {
+      finalAnswer: finalOutput || '',
+    });
   }
 }
