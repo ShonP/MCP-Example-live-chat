@@ -59,4 +59,4 @@ Be helpful and thorough in your analysis.
 `;
 
 export const AGENT_NAME = 'Data Intelligence Agent';
-export const AGENT_MODEL = 'gpt-4o';
+export const AGENT_MODEL = 'gpt-5.1';
